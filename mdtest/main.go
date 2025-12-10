@@ -70,12 +70,12 @@ func main() {
 	log = waLog.Stdout("Main", logLevel, true)
 
 	dbLog := waLog.Stdout("Database", logLevel, true)
-	storeContainer, err := sqlstore.New(*dbDialect, *dbAddress, dbLog)
+	storeContainer, err := sqlstore.New(context.Background(), *dbDialect, *dbAddress, dbLog)
 	if err != nil {
 		log.Errorf("Failed to connect to database: %v", err)
 		return
 	}
-	device, err := storeContainer.GetFirstDevice()
+	device, err := storeContainer.GetFirstDevice(context.Background())
 	if err != nil {
 		log.Errorf("Failed to get device: %v", err)
 		return
@@ -198,7 +198,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: pair-phone <number>")
 			return
 		}
-		linkingCode, err := cli.PairPhone(args[0], true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+		linkingCode, err := cli.PairPhone(context.Background(), args[0], true, whatsmeow.PairClientChrome, "Chrome (Linux)")
 		if err != nil {
 			panic(err)
 		}
@@ -210,7 +210,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Failed to connect: %v", err)
 		}
 	case "logout":
-		err := cli.Logout()
+		err := cli.Logout(context.Background())
 		if err != nil {
 			log.Errorf("Error logging out: %v", err)
 		} else {
@@ -227,7 +227,7 @@ func handleCmd(cmd string, args []string) {
 		}
 		resync := len(args) > 1 && args[1] == "resync"
 		for _, name := range names {
-			err := cli.FetchAppState(name, resync, false)
+			err := cli.FetchAppState(context.Background(), name, resync, false)
 			if err != nil {
 				log.Errorf("Failed to sync app state: %v", err)
 			}
@@ -273,7 +273,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: checkuser <phone numbers...>")
 			return
 		}
-		resp, err := cli.IsOnWhatsApp(args)
+		resp, err := cli.IsOnWhatsApp(context.Background(), args)
 		if err != nil {
 			log.Errorf("Failed to check if users are on WhatsApp: %s", err.Error())
 		} else {
@@ -294,7 +294,7 @@ func handleCmd(cmd string, args []string) {
 		if !ok {
 			return
 		}
-		err := cli.SubscribePresence(jid)
+		err := cli.SubscribePresence(context.Background(), jid)
 		if err != nil {
 			fmt.Println(err)
 		}
@@ -303,7 +303,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: presence <available/unavailable>")
 			return
 		}
-		fmt.Println(cli.SendPresence(types.Presence(args[0])))
+		fmt.Println(cli.SendPresence(context.Background(), types.Presence(args[0])))
 	case "chatpresence":
 		if len(args) == 2 {
 			args = append(args, "")
@@ -312,9 +312,9 @@ func handleCmd(cmd string, args []string) {
 			return
 		}
 		jid, _ := types.ParseJID(args[0])
-		fmt.Println(cli.SendChatPresence(jid, types.ChatPresence(args[1]), types.ChatPresenceMedia(args[2])))
+		fmt.Println(cli.SendChatPresence(context.Background(), jid, types.ChatPresence(args[1]), types.ChatPresenceMedia(args[2])))
 	case "privacysettings":
-		resp, err := cli.TryFetchPrivacySettings(false)
+		resp, err := cli.TryFetchPrivacySettings(context.Background(), false)
 		if err != nil {
 			fmt.Println(err)
 		} else {
@@ -327,7 +327,7 @@ func handleCmd(cmd string, args []string) {
 		}
 		setting := types.PrivacySettingType(args[0])
 		value := types.PrivacySetting(args[1])
-		resp, err := cli.SetPrivacySetting(setting, value)
+		resp, err := cli.SetPrivacySetting(context.Background(), setting, value)
 		if err != nil {
 			fmt.Println(err)
 		} else {
@@ -346,7 +346,7 @@ func handleCmd(cmd string, args []string) {
 			}
 			jids = append(jids, jid)
 		}
-		resp, err := cli.GetUserInfo(jids)
+		resp, err := cli.GetUserInfo(context.Background(), jids)
 		if err != nil {
 			log.Errorf("Failed to get user info: %v", err)
 		} else {
@@ -355,7 +355,7 @@ func handleCmd(cmd string, args []string) {
 			}
 		}
 	case "mediaconn":
-		conn, err := cli.DangerousInternals().RefreshMediaConn(false)
+		conn, err := cli.DangerousInternals().RefreshMediaConn(context.Background(), false)
 
 		if err != nil {
 			log.Errorf("Failed to get media connection: %v", err)
@@ -366,13 +366,13 @@ func handleCmd(cmd string, args []string) {
 		var node waBinary.Node
 		if err := json.Unmarshal([]byte(strings.Join(args, " ")), &node); err != nil {
 			log.Errorf("Failed to parse args as JSON into XML node: %v", err)
-		} else if err = cli.DangerousInternals().SendNode(node); err != nil {
+		} else if err = cli.DangerousInternals().SendNode(context.Background(), node); err != nil {
 			log.Errorf("Error sending node: %v", err)
 		} else {
 			log.Infof("Node sent")
 		}
 	case "listnewsletters":
-		newsletters, err := cli.GetSubscribedNewsletters()
+		newsletters, err := cli.GetSubscribedNewsletters(context.Background())
 		if err != nil {
 			log.Errorf("Failed to get subscribed newsletters: %v", err)
 			return
@@ -385,14 +385,14 @@ func handleCmd(cmd string, args []string) {
 		if !ok {
 			return
 		}
-		meta, err := cli.GetNewsletterInfo(jid)
+		meta, err := cli.GetNewsletterInfo(context.Background(), jid)
 		if err != nil {
 			log.Errorf("Failed to get info: %v", err)
 		} else {
 			log.Infof("Got info: %+v", meta)
 		}
 	case "getnewsletterinvite":
-		meta, err := cli.GetNewsletterInfoWithInvite(args[0])
+		meta, err := cli.GetNewsletterInfoWithInvite(context.Background(), args[0])
 		if err != nil {
 			log.Errorf("Failed to get info: %v", err)
 		} else {
@@ -439,7 +439,7 @@ func handleCmd(cmd string, args []string) {
 				return
 			}
 		}
-		messages, err := cli.GetNewsletterMessages(jid, &whatsmeow.GetNewsletterMessagesParams{Count: count, Before: before})
+		messages, err := cli.GetNewsletterMessages(context.Background(), jid, &whatsmeow.GetNewsletterMessagesParams{Count: count, Before: before})
 		if err != nil {
 			log.Errorf("Failed to get messages: %v", err)
 		} else {
@@ -452,7 +452,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: createnewsletter <name>")
 			return
 		}
-		resp, err := cli.CreateNewsletter(whatsmeow.CreateNewsletterParams{
+		resp, err := cli.CreateNewsletter(context.Background(), whatsmeow.CreateNewsletterParams{
 			Name: strings.Join(args, " "),
 		})
 		if err != nil {
@@ -481,7 +481,7 @@ func handleCmd(cmd string, args []string) {
 				isCommunity = true
 			}
 		}
-		pic, err := cli.GetProfilePictureInfo(jid, &whatsmeow.GetProfilePictureParams{
+		pic, err := cli.GetProfilePictureInfo(context.Background(), jid, &whatsmeow.GetProfilePictureParams{
 			Preview:     preview,
 			IsCommunity: isCommunity,
 			ExistingID:  existingID,
@@ -505,7 +505,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Input must be a group JID (@%s)", types.GroupServer)
 			return
 		}
-		resp, err := cli.GetGroupInfo(group)
+		resp, err := cli.GetGroupInfo(context.Background(), group)
 		if err != nil {
 			log.Errorf("Failed to get group info: %v", err)
 		} else {
@@ -523,7 +523,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Input must be a group JID (@%s)", types.GroupServer)
 			return
 		}
-		resp, err := cli.GetSubGroups(group)
+		resp, err := cli.GetSubGroups(context.Background(), group)
 		if err != nil {
 			log.Errorf("Failed to get subgroups: %v", err)
 		} else {
@@ -543,14 +543,14 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Input must be a group JID (@%s)", types.GroupServer)
 			return
 		}
-		resp, err := cli.GetLinkedGroupsParticipants(group)
+		resp, err := cli.GetLinkedGroupsParticipants(context.Background(), group)
 		if err != nil {
 			log.Errorf("Failed to get community participants: %v", err)
 		} else {
 			log.Infof("Community participants: %+v", resp)
 		}
 	case "listgroups":
-		groups, err := cli.GetJoinedGroups()
+		groups, err := cli.GetJoinedGroups(context.Background())
 		if err != nil {
 			log.Errorf("Failed to get group list: %v", err)
 		} else {
@@ -570,7 +570,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Input must be a group JID (@%s)", types.GroupServer)
 			return
 		}
-		resp, err := cli.GetGroupInviteLink(group, len(args) > 1 && args[1] == "--reset")
+		resp, err := cli.GetGroupInviteLink(context.Background(), group, len(args) > 1 && args[1] == "--reset")
 		if err != nil {
 			log.Errorf("Failed to get group invite link: %v", err)
 		} else {
@@ -581,7 +581,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: queryinvitelink <link>")
 			return
 		}
-		resp, err := cli.GetGroupInfoFromLink(args[0])
+		resp, err := cli.GetGroupInfoFromLink(context.Background(), args[0])
 		if err != nil {
 			log.Errorf("Failed to resolve group invite link: %v", err)
 		} else {
@@ -592,7 +592,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: querybusinesslink <link>")
 			return
 		}
-		resp, err := cli.ResolveBusinessMessageLink(args[0])
+		resp, err := cli.ResolveBusinessMessageLink(context.Background(), args[0])
 		if err != nil {
 			log.Errorf("Failed to resolve business message link: %v", err)
 		} else {
@@ -603,7 +603,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: acceptinvitelink <link>")
 			return
 		}
-		groupID, err := cli.JoinGroupWithLink(args[0])
+		groupID, err := cli.JoinGroupWithLink(context.Background(), args[0])
 		if err != nil {
 			log.Errorf("Failed to join group via invite link: %v", err)
 		} else {
@@ -632,7 +632,7 @@ func handleCmd(cmd string, args []string) {
 				return
 			}
 		}
-		resp, err := cli.UpdateGroupParticipants(jid, users, action)
+		resp, err := cli.UpdateGroupParticipants(context.Background(), jid, users, action)
 		if err != nil {
 			log.Errorf("Failed to add participant: %v", err)
 			return
@@ -672,14 +672,14 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Invalid JID")
 			return
 		}
-		resp, err := cli.GetGroupRequestParticipants(group)
+		resp, err := cli.GetGroupRequestParticipants(context.Background(), group)
 		if err != nil {
 			log.Errorf("Failed to get request participants: %v", err)
 		} else {
 			log.Infof("Request participants: %+v", resp)
 		}
 	case "getstatusprivacy":
-		resp, err := cli.GetStatusPrivacy()
+		resp, err := cli.GetStatusPrivacy(context.Background())
 		fmt.Println(err)
 		fmt.Println(resp)
 	case "setdisappeartimer":
@@ -696,7 +696,7 @@ func handleCmd(cmd string, args []string) {
 		if !ok {
 			return
 		}
-		err = cli.SetDisappearingTimer(recipient, time.Duration(days)*24*time.Hour)
+		err = cli.SetDisappearingTimer(context.Background(), recipient, time.Duration(days)*24*time.Hour, time.Time{})
 		if err != nil {
 			log.Errorf("Failed to set disappearing timer: %v", err)
 		}
@@ -710,7 +710,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Invalid duration: %v", err)
 			return
 		}
-		err = cli.SetDefaultDisappearingTimer(time.Duration(days) * 24 * time.Hour)
+		err = cli.SetDefaultDisappearingTimer(context.Background(), time.Duration(days) * 24 * time.Hour)
 		if err != nil {
 			log.Errorf("Failed to set default disappearing timer: %v", err)
 		}
@@ -1001,7 +1001,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: setpushname <name>")
 			return
 		}
-		err := cli.SendAppState(appstate.BuildSettingPushName(strings.Join(args, " ")))
+		err := cli.SendAppState(context.Background(), appstate.BuildSettingPushName(strings.Join(args, " ")))
 		if err != nil {
 			log.Errorf("Error setting push name: %v", err)
 		} else {
@@ -1012,7 +1012,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: setstatus <message>")
 			return
 		}
-		err := cli.SetStatusMessage(strings.Join(args, " "))
+		err := cli.SetStatusMessage(context.Background(), strings.Join(args, " "))
 		if err != nil {
 			log.Errorf("Error setting status message: %v", err)
 		} else {
@@ -1033,7 +1033,7 @@ func handleCmd(cmd string, args []string) {
 			return
 		}
 
-		err = cli.SendAppState(appstate.BuildArchive(target, action, time.Time{}, nil))
+		err = cli.SendAppState(context.Background(), appstate.BuildArchive(target, action, time.Time{}, nil))
 		if err != nil {
 			log.Errorf("Error changing chat's archive state: %v", err)
 		}
@@ -1052,7 +1052,7 @@ func handleCmd(cmd string, args []string) {
 			return
 		}
 
-		err = cli.SendAppState(appstate.BuildMute(target, action, 1*time.Hour))
+		err = cli.SendAppState(context.Background(), appstate.BuildMute(target, action, 1*time.Hour))
 		if err != nil {
 			log.Errorf("Error changing chat's mute state: %v", err)
 		}
@@ -1071,12 +1071,12 @@ func handleCmd(cmd string, args []string) {
 			return
 		}
 
-		err = cli.SendAppState(appstate.BuildPin(target, action))
+		err = cli.SendAppState(context.Background(), appstate.BuildPin(target, action))
 		if err != nil {
 			log.Errorf("Error changing chat's pin state: %v", err)
 		}
 	case "getblocklist":
-		blocklist, err := cli.GetBlocklist()
+		blocklist, err := cli.GetBlocklist(context.Background())
 		if err != nil {
 			log.Errorf("Failed to get blocked contacts list: %v", err)
 		} else {
@@ -1091,7 +1091,7 @@ func handleCmd(cmd string, args []string) {
 		if !ok {
 			return
 		}
-		resp, err := cli.UpdateBlocklist(jid, events.BlocklistChangeActionBlock)
+		resp, err := cli.UpdateBlocklist(context.Background(), jid, events.BlocklistChangeActionBlock)
 		if err != nil {
 			log.Errorf("Error updating blocklist: %v", err)
 		} else {
@@ -1106,7 +1106,7 @@ func handleCmd(cmd string, args []string) {
 		if !ok {
 			return
 		}
-		resp, err := cli.UpdateBlocklist(jid, events.BlocklistChangeActionUnblock)
+		resp, err := cli.UpdateBlocklist(context.Background(), jid, events.BlocklistChangeActionUnblock)
 		if err != nil {
 			log.Errorf("Error updating blocklist: %v", err)
 		} else {
@@ -1128,7 +1128,7 @@ func handleCmd(cmd string, args []string) {
 			return
 		}
 
-		err = cli.SendAppState(appstate.BuildLabelChat(jid, labelID, action))
+		err = cli.SendAppState(context.Background(), appstate.BuildLabelChat(jid, labelID, action))
 		if err != nil {
 			log.Errorf("Error changing chat's label state: %v", err)
 		}
@@ -1149,7 +1149,7 @@ func handleCmd(cmd string, args []string) {
 			return
 		}
 
-		err = cli.SendAppState(appstate.BuildLabelMessage(jid, labelID, messageID, action))
+		err = cli.SendAppState(context.Background(), appstate.BuildLabelMessage(jid, labelID, messageID, action))
 		if err != nil {
 			log.Errorf("Error changing message's label state: %v", err)
 		}
@@ -1171,7 +1171,7 @@ func handleCmd(cmd string, args []string) {
 			return
 		}
 
-		err = cli.SendAppState(appstate.BuildLabelEdit(labelID, name, int32(color), action))
+		err = cli.SendAppState(context.Background(), appstate.BuildLabelEdit(labelID, name, int32(color), action))
 		if err != nil {
 			log.Errorf("Error editing label: %v", err)
 		}
@@ -1191,8 +1191,6 @@ func handleCmd(cmd string, args []string) {
 			}
 		}
 
-		personaID := proto.String("867051314767696$760019659443059") // default meta bot personality: "Assistant"
-
 		var resp, err = whatsmeow.SendResponse{}, error(nil)
 		if !inlineJID.IsEmpty() {
 			text := fmt.Sprintf("@%s %s", types.MetaAIJID.User, strings.Join(args[1:], " "))
@@ -1204,9 +1202,8 @@ func handleCmd(cmd string, args []string) {
 					},
 				},
 				MessageContextInfo: &waE2E.MessageContextInfo{
-					BotMetadata: &waE2E.BotMetadata{
-						PersonaID: personaID,
-					},
+					DeviceListMetadata:  &waE2E.DeviceListMetadata{},
+					DeviceListMetadataVersion: proto.Int32(2),
 				},
 			}
 
@@ -1218,9 +1215,8 @@ func handleCmd(cmd string, args []string) {
 			msg := &waE2E.Message{
 				Conversation: &text,
 				MessageContextInfo: &waE2E.MessageContextInfo{
-					BotMetadata: &waE2E.BotMetadata{
-						PersonaID: personaID,
-					},
+					DeviceListMetadata:  &waE2E.DeviceListMetadata{},
+					DeviceListMetadataVersion: proto.Int32(2),
 				},
 			}
 			resp, err = cli.SendMessage(context.Background(), types.MetaAIJID, msg)
@@ -1231,9 +1227,9 @@ func handleCmd(cmd string, args []string) {
 			log.Infof("Bot message sent (server timestamp: %s)", resp.Timestamp)
 		}
 	case "fetchbotprofiles":
-		list, _ := cli.GetBotListV2()
+		list, _ := cli.GetBotListV2(context.Background())
 		log.Infof("Bots list: %+v", list)
-		profiles, _ := cli.GetBotProfiles(list)
+		profiles, _ := cli.GetBotProfiles(context.Background(), list)
 		log.Infof("Bots profiles: %+v", profiles)
 	}
 }
@@ -1245,7 +1241,7 @@ func handler(rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
 	case *events.AppStateSyncComplete:
 		if len(cli.Store.PushName) > 0 && evt.Name == appstate.WAPatchCriticalBlock {
-			err := cli.SendPresence(types.PresenceAvailable)
+			err := cli.SendPresence(context.Background(), types.PresenceAvailable)
 			if err != nil {
 				log.Warnf("Failed to send available presence: %v", err)
 			} else {
@@ -1258,7 +1254,7 @@ func handler(rawEvt interface{}) {
 		}
 		// Send presence available when connecting and when the pushname is changed.
 		// This makes sure that outgoing messages always have the right pushname.
-		err := cli.SendPresence(types.PresenceAvailable)
+		err := cli.SendPresence(context.Background(), types.PresenceAvailable)
 		if err != nil {
 			log.Warnf("Failed to send available presence: %v", err)
 		} else {
@@ -1293,7 +1289,7 @@ func handler(rawEvt interface{}) {
 		log.Infof("Received message %s from %s (%s): %+v", evt.Info.ID, evt.Info.SourceString(), strings.Join(metaParts, ", "), evt.Message)
 
 		if evt.Message.GetPollUpdateMessage() != nil {
-			decrypted, err := cli.DecryptPollVote(evt)
+			decrypted, err := cli.DecryptPollVote(context.Background(), evt)
 			if err != nil {
 				log.Errorf("Failed to decrypt vote: %v", err)
 			} else {
@@ -1303,7 +1299,7 @@ func handler(rawEvt interface{}) {
 				}
 			}
 		} else if evt.Message.GetEncReactionMessage() != nil {
-			decrypted, err := cli.DecryptReaction(evt)
+			decrypted, err := cli.DecryptReaction(context.Background(), evt)
 			if err != nil {
 				log.Errorf("Failed to decrypt encrypted reaction: %v", err)
 			} else {
@@ -1313,7 +1309,7 @@ func handler(rawEvt interface{}) {
 
 		img := evt.Message.GetImageMessage()
 		if img != nil {
-			data, err := cli.Download(img)
+			data, err := cli.Download(context.Background(), img)
 			if err != nil {
 				log.Errorf("Failed to download image: %v", err)
 				return
