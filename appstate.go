@@ -13,9 +13,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"go.mau.fi/whatsmeow/appstate"
 	waBinary "go.mau.fi/whatsmeow/binary"
-	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waServerSync"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -23,67 +26,106 @@ import (
 
 // FetchAppState fetches updates to the given type of app state. If fullSync is true, the current
 // cached state will be removed and all app state patches will be re-fetched from the server.
-func (cli *Client) FetchAppState(name appstate.WAPatchName, fullSync, onlyIfNotSynced bool) error {
+func (cli *Client) FetchAppState(ctx context.Context, name appstate.WAPatchName, fullSync, onlyIfNotSynced bool) error {
+	eventsToDispatch, err := cli.fetchAppState(ctx, name, fullSync, onlyIfNotSynced)
+	if err != nil {
+		return err
+	}
+	for _, evt := range eventsToDispatch {
+		cli.dispatchEvent(evt)
+	}
+	return nil
+}
+
+func (cli *Client) fetchAppState(ctx context.Context, name appstate.WAPatchName, fullSync, onlyIfNotSynced bool) ([]any, error) {
+	if cli == nil {
+		return nil, ErrClientIsNil
+	}
 	cli.appStateSyncLock.Lock()
 	defer cli.appStateSyncLock.Unlock()
 	if fullSync {
-		err := cli.Store.AppState.DeleteAppStateVersion(string(name))
+		err := cli.Store.AppState.DeleteAppStateVersion(ctx, string(name))
 		if err != nil {
-			return fmt.Errorf("failed to reset app state %s version: %w", name, err)
+			return nil, fmt.Errorf("failed to reset app state %s version: %w", name, err)
 		}
 	}
-	version, hash, err := cli.Store.AppState.GetAppStateVersion(string(name))
+	version, hash, err := cli.Store.AppState.GetAppStateVersion(ctx, string(name))
 	if err != nil {
-		return fmt.Errorf("failed to get app state %s version: %w", name, err)
+		return nil, fmt.Errorf("failed to get app state %s version: %w", name, err)
 	}
 	if version == 0 {
 		fullSync = true
 	} else if onlyIfNotSynced {
-		return nil
+		return nil, nil
 	}
 
 	state := appstate.HashState{Version: version, Hash: hash}
 
 	hasMore := true
 	wantSnapshot := fullSync
+	var eventsToDispatch []any
+	eventsToDispatchPtr := &eventsToDispatch
+	if fullSync && !cli.EmitAppStateEventsOnFullSync {
+		eventsToDispatchPtr = nil
+	}
 	for hasMore {
-		patches, err := cli.fetchAppStatePatches(name, state.Version, wantSnapshot)
+		patches, err := cli.fetchAppStatePatches(ctx, name, state.Version, wantSnapshot)
 		wantSnapshot = false
 		if err != nil {
-			return fmt.Errorf("failed to fetch app state %s patches: %w", name, err)
+			return nil, fmt.Errorf("failed to fetch app state %s patches: %w", name, err)
 		}
 		hasMore = patches.HasMorePatches
-
-		mutations, newState, err := cli.appStateProc.DecodePatches(patches, state, true)
+		state, err = cli.applyAppStatePatches(ctx, name, state, patches, fullSync, eventsToDispatchPtr)
 		if err != nil {
-			if errors.Is(err, appstate.ErrKeyNotFound) {
-				go cli.requestMissingAppStateKeys(context.TODO(), patches)
-			}
-			return fmt.Errorf("failed to decode app state %s patches: %w", name, err)
-		}
-		wasFullSync := state.Version == 0 && patches.Snapshot != nil
-		state = newState
-		if name == appstate.WAPatchCriticalUnblockLow && wasFullSync && !cli.EmitAppStateEventsOnFullSync {
-			var contacts []store.ContactEntry
-			mutations, contacts = cli.filterContacts(mutations)
-			cli.Log.Debugf("Mass inserting app state snapshot with %d contacts into the store", len(contacts))
-			err = cli.Store.Contacts.PutAllContactNames(contacts)
-			if err != nil {
-				// This is a fairly serious failure, so just abort the whole thing
-				return fmt.Errorf("failed to update contact store with data from snapshot: %v", err)
-			}
-		}
-		for _, mutation := range mutations {
-			cli.dispatchAppState(mutation, fullSync, cli.EmitAppStateEventsOnFullSync)
+			return nil, err
 		}
 	}
 	if fullSync {
 		cli.Log.Debugf("Full sync of app state %s completed. Current version: %d", name, state.Version)
-		cli.dispatchEvent(&events.AppStateSyncComplete{Name: name})
+		eventsToDispatch = append(eventsToDispatch, &events.AppStateSyncComplete{Name: name})
 	} else {
 		cli.Log.Debugf("Synced app state %s from version %d to %d", name, version, state.Version)
 	}
-	return nil
+	return eventsToDispatch, nil
+}
+
+func (cli *Client) applyAppStatePatches(
+	ctx context.Context,
+	name appstate.WAPatchName,
+	state appstate.HashState,
+	patches *appstate.PatchList,
+	fullSync bool,
+	eventsToDispatch *[]any,
+) (appstate.HashState, error) {
+	mutations, newState, err := cli.appStateProc.DecodePatches(ctx, patches, state, true)
+	if err != nil {
+		if errors.Is(err, appstate.ErrKeyNotFound) {
+			go cli.requestMissingAppStateKeys(context.WithoutCancel(ctx), patches)
+		}
+		return state, fmt.Errorf("failed to decode app state %s patches: %w", name, err)
+	}
+	wasFullSync := state.Version == 0 && patches.Snapshot != nil
+	state = newState
+	if name == appstate.WAPatchCriticalUnblockLow && wasFullSync && !cli.EmitAppStateEventsOnFullSync {
+		var contacts []store.ContactEntry
+		mutations, contacts = cli.filterContacts(mutations)
+		cli.Log.Debugf("Mass inserting app state snapshot with %d contacts into the store", len(contacts))
+		err = cli.Store.Contacts.PutAllContactNames(ctx, contacts)
+		if err != nil {
+			// This is a fairly serious failure, so just abort the whole thing
+			return state, fmt.Errorf("failed to update contact store with data from snapshot: %v", err)
+		}
+	}
+	for _, mutation := range mutations {
+		if eventsToDispatch != nil && mutation.Operation == waServerSync.SyncdMutation_SET {
+			*eventsToDispatch = append(*eventsToDispatch, &events.AppState{Index: mutation.Index, SyncActionValue: mutation.Action})
+		}
+		evt := cli.dispatchAppState(ctx, mutation, fullSync)
+		if eventsToDispatch != nil && evt != nil {
+			*eventsToDispatch = append(*eventsToDispatch, evt)
+		}
+	}
+	return state, nil
 }
 
 func (cli *Client) filterContacts(mutations []appstate.Mutation) ([]appstate.Mutation, []store.ContactEntry) {
@@ -105,16 +147,11 @@ func (cli *Client) filterContacts(mutations []appstate.Mutation) ([]appstate.Mut
 	return filteredMutations, contacts
 }
 
-func (cli *Client) dispatchAppState(mutation appstate.Mutation, fullSync bool, emitOnFullSync bool) {
+func (cli *Client) dispatchAppState(ctx context.Context, mutation appstate.Mutation, fullSync bool) (eventToDispatch any) {
+	zerolog.Ctx(ctx).Trace().Any("mutation", mutation).Msg("Dispatching app state mutation")
 
-	dispatchEvts := !fullSync || emitOnFullSync
-
-	if mutation.Operation != waProto.SyncdMutation_SET {
+	if mutation.Operation != waServerSync.SyncdMutation_SET {
 		return
-	}
-
-	if dispatchEvts {
-		cli.dispatchEvent(&events.AppState{Index: mutation.Index, SyncActionValue: mutation.Action})
 	}
 
 	var jid types.JID
@@ -124,35 +161,38 @@ func (cli *Client) dispatchAppState(mutation appstate.Mutation, fullSync bool, e
 	ts := time.UnixMilli(mutation.Action.GetTimestamp())
 
 	var storeUpdateError error
-	var eventToDispatch interface{}
 	switch mutation.Index[0] {
 	case appstate.IndexMute:
 		act := mutation.Action.GetMuteAction()
 		eventToDispatch = &events.Mute{JID: jid, Timestamp: ts, Action: act, FromFullSync: fullSync}
 		var mutedUntil time.Time
 		if act.GetMuted() {
-			mutedUntil = time.UnixMilli(act.GetMuteEndTimestamp())
+			if act.GetMuteEndTimestamp() < 0 {
+				mutedUntil = store.MutedForever
+			} else {
+				mutedUntil = time.UnixMilli(act.GetMuteEndTimestamp())
+			}
 		}
 		if cli.Store.ChatSettings != nil {
-			storeUpdateError = cli.Store.ChatSettings.PutMutedUntil(jid, mutedUntil)
+			storeUpdateError = cli.Store.ChatSettings.PutMutedUntil(ctx, jid, mutedUntil)
 		}
 	case appstate.IndexPin:
 		act := mutation.Action.GetPinAction()
 		eventToDispatch = &events.Pin{JID: jid, Timestamp: ts, Action: act, FromFullSync: fullSync}
 		if cli.Store.ChatSettings != nil {
-			storeUpdateError = cli.Store.ChatSettings.PutPinned(jid, act.GetPinned())
+			storeUpdateError = cli.Store.ChatSettings.PutPinned(ctx, jid, act.GetPinned())
 		}
 	case appstate.IndexArchive:
 		act := mutation.Action.GetArchiveChatAction()
 		eventToDispatch = &events.Archive{JID: jid, Timestamp: ts, Action: act, FromFullSync: fullSync}
 		if cli.Store.ChatSettings != nil {
-			storeUpdateError = cli.Store.ChatSettings.PutArchived(jid, act.GetArchived())
+			storeUpdateError = cli.Store.ChatSettings.PutArchived(ctx, jid, act.GetArchived())
 		}
 	case appstate.IndexContact:
 		act := mutation.Action.GetContactAction()
 		eventToDispatch = &events.Contact{JID: jid, Timestamp: ts, Action: act, FromFullSync: fullSync}
 		if cli.Store.Contacts != nil {
-			storeUpdateError = cli.Store.Contacts.PutContactName(jid, act.GetFirstName(), act.GetFullName())
+			storeUpdateError = cli.Store.Contacts.PutContactName(ctx, jid, act.GetFirstName(), act.GetFullName())
 		}
 	case appstate.IndexClearChat:
 		act := mutation.Action.GetClearChatAction()
@@ -206,7 +246,7 @@ func (cli *Client) dispatchAppState(mutation appstate.Mutation, fullSync bool, e
 			FromFullSync: fullSync,
 		}
 		cli.Store.PushName = mutation.Action.GetPushNameSetting().GetName()
-		err := cli.Store.Save()
+		err := cli.Store.Save(ctx)
 		if err != nil {
 			cli.Log.Errorf("Failed to save device store after updating push name: %v", err)
 		}
@@ -262,16 +302,14 @@ func (cli *Client) dispatchAppState(mutation appstate.Mutation, fullSync bool, e
 	if storeUpdateError != nil {
 		cli.Log.Errorf("Failed to update device store after app state mutation: %v", storeUpdateError)
 	}
-	if dispatchEvts && eventToDispatch != nil {
-		cli.dispatchEvent(eventToDispatch)
-	}
+	return
 }
 
-func (cli *Client) downloadExternalAppStateBlob(ref *waProto.ExternalBlobReference) ([]byte, error) {
-	return cli.Download(ref)
+func (cli *Client) downloadExternalAppStateBlob(ctx context.Context, ref *waServerSync.ExternalBlobReference) ([]byte, error) {
+	return cli.Download(ctx, ref)
 }
 
-func (cli *Client) fetchAppStatePatches(name appstate.WAPatchName, fromVersion uint64, snapshot bool) (*appstate.PatchList, error) {
+func (cli *Client) fetchAppStatePatches(ctx context.Context, name appstate.WAPatchName, fromVersion uint64, snapshot bool) (*appstate.PatchList, error) {
 	attrs := waBinary.Attrs{
 		"name":            string(name),
 		"return_snapshot": snapshot,
@@ -279,7 +317,7 @@ func (cli *Client) fetchAppStatePatches(name appstate.WAPatchName, fromVersion u
 	if !snapshot {
 		attrs["version"] = fromVersion
 	}
-	resp, err := cli.sendIQ(infoQuery{
+	resp, err := cli.sendIQ(ctx, infoQuery{
 		Namespace: "w:sync:app:state",
 		Type:      "set",
 		To:        types.ServerJID,
@@ -294,12 +332,16 @@ func (cli *Client) fetchAppStatePatches(name appstate.WAPatchName, fromVersion u
 	if err != nil {
 		return nil, err
 	}
-	return appstate.ParsePatchList(resp, cli.downloadExternalAppStateBlob)
+	collection, ok := resp.GetOptionalChildByTag("sync", "collection")
+	if !ok {
+		return nil, &ElementMissingError{Tag: "collection", In: "app state patch response"}
+	}
+	return appstate.ParsePatchList(ctx, &collection, cli.downloadExternalAppStateBlob)
 }
 
 func (cli *Client) requestMissingAppStateKeys(ctx context.Context, patches *appstate.PatchList) {
 	cli.appStateKeyRequestsLock.Lock()
-	rawKeyIDs := cli.appStateProc.GetMissingKeyIDs(patches)
+	rawKeyIDs := cli.appStateProc.GetMissingKeyIDs(ctx, patches)
 	filteredKeyIDs := make([][]byte, 0, len(rawKeyIDs))
 	now := time.Now()
 	for _, keyID := range rawKeyIDs {
@@ -315,16 +357,16 @@ func (cli *Client) requestMissingAppStateKeys(ctx context.Context, patches *apps
 }
 
 func (cli *Client) requestAppStateKeys(ctx context.Context, rawKeyIDs [][]byte) {
-	keyIDs := make([]*waProto.AppStateSyncKeyId, len(rawKeyIDs))
+	keyIDs := make([]*waE2E.AppStateSyncKeyId, len(rawKeyIDs))
 	debugKeyIDs := make([]string, len(rawKeyIDs))
 	for i, keyID := range rawKeyIDs {
-		keyIDs[i] = &waProto.AppStateSyncKeyId{KeyID: keyID}
+		keyIDs[i] = &waE2E.AppStateSyncKeyId{KeyID: keyID}
 		debugKeyIDs[i] = hex.EncodeToString(keyID)
 	}
-	msg := &waProto.Message{
-		ProtocolMessage: &waProto.ProtocolMessage{
-			Type: waProto.ProtocolMessage_APP_STATE_SYNC_KEY_REQUEST.Enum(),
-			AppStateSyncKeyRequest: &waProto.AppStateSyncKeyRequest{
+	msg := &waE2E.Message{
+		ProtocolMessage: &waE2E.ProtocolMessage{
+			Type: waE2E.ProtocolMessage_APP_STATE_SYNC_KEY_REQUEST.Enum(),
+			AppStateSyncKeyRequest: &waE2E.AppStateSyncKeyRequest{
 				KeyIDs: keyIDs,
 			},
 		},
@@ -340,19 +382,26 @@ func (cli *Client) requestAppStateKeys(ctx context.Context, rawKeyIDs [][]byte) 
 	}
 }
 
-// SendAppState sends the given app state patch, then resyncs that app state type from the server
+// SendAppState sends the given app state patch, then triggers a background resync of that app state type
 // to update local caches and send events for the updates.
 //
 // You can use the Build methods in the appstate package to build the parameter for this method, e.g.
 //
-//	cli.SendAppState(appstate.BuildMute(targetJID, true, 24 * time.Hour))
-func (cli *Client) SendAppState(patch appstate.PatchInfo) error {
-	version, hash, err := cli.Store.AppState.GetAppStateVersion(string(patch.Type))
+//	cli.SendAppState(ctx, appstate.BuildMute(targetJID, true, 24 * time.Hour))
+func (cli *Client) SendAppState(ctx context.Context, patch appstate.PatchInfo) error {
+	return cli.sendAppState(ctx, patch, true)
+}
+
+func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, allowRetry bool) error {
+	if cli == nil {
+		return ErrClientIsNil
+	}
+	version, hash, err := cli.Store.AppState.GetAppStateVersion(ctx, string(patch.Type))
 	if err != nil {
 		return err
 	}
 	// TODO create new key instead of reusing the primary client's keys
-	latestKeyID, err := cli.Store.AppStateKeys.GetLatestAppStateSyncKeyID()
+	latestKeyID, err := cli.Store.AppStateKeys.GetLatestAppStateSyncKeyID(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get latest app state key ID: %w", err)
 	} else if latestKeyID == nil {
@@ -361,12 +410,12 @@ func (cli *Client) SendAppState(patch appstate.PatchInfo) error {
 
 	state := appstate.HashState{Version: version, Hash: hash}
 
-	encodedPatch, err := cli.appStateProc.EncodePatch(latestKeyID, state, patch)
+	encodedPatch, err := cli.appStateProc.EncodePatch(ctx, latestKeyID, state, patch)
 	if err != nil {
 		return err
 	}
 
-	resp, err := cli.sendIQ(infoQuery{
+	resp, err := cli.sendIQ(ctx, infoQuery{
 		Namespace: "w:sync:app:state",
 		Type:      iqSet,
 		To:        types.ServerJID,
@@ -390,12 +439,63 @@ func (cli *Client) SendAppState(patch appstate.PatchInfo) error {
 		return err
 	}
 
-	respCollection := resp.GetChildByTag("sync", "collection")
+	respCollection, ok := resp.GetOptionalChildByTag("sync", "collection")
+	if !ok {
+		return &ElementMissingError{Tag: "collection", In: "app state send response"}
+	}
 	respCollectionAttr := respCollection.AttrGetter()
 	if respCollectionAttr.OptionalString("type") == "error" {
-		// TODO parse error properly
-		return fmt.Errorf("%w: %s", ErrAppStateUpdate, respCollection.XMLString())
-	}
+		errorTag, ok := respCollection.GetOptionalChildByTag("error")
 
-	return cli.FetchAppState(patch.Type, false, false)
+		mainErr := fmt.Errorf("%w: %s", ErrAppStateUpdate, respCollection.XMLString())
+		if ok {
+			mainErr = fmt.Errorf("%w (%s): %s", ErrAppStateUpdate, patch.Type, errorTag.XMLString())
+		}
+		if ok && errorTag.AttrGetter().Int("code") == 409 && allowRetry {
+			zerolog.Ctx(ctx).Warn().Err(mainErr).Msg("Failed to update app state, trying to apply conflicts and retry")
+			var eventsToDispatch []any
+			patches, err := appstate.ParsePatchList(ctx, &respCollection, cli.downloadExternalAppStateBlob)
+			if err != nil {
+				return fmt.Errorf("%w (also, parsing patches in the response failed: %w)", mainErr, err)
+			} else if state, err = cli.applyAppStatePatches(ctx, patch.Type, state, patches, false, &eventsToDispatch); err != nil {
+				return fmt.Errorf("%w (also, applying patches in the response failed: %w)", mainErr, err)
+			} else {
+				zerolog.Ctx(ctx).Debug().Msg("Retrying app state send after applying conflicting patches")
+				go func() {
+					for _, evt := range eventsToDispatch {
+						cli.dispatchEvent(evt)
+					}
+				}()
+				return cli.sendAppState(ctx, patch, false)
+			}
+		}
+		return mainErr
+	}
+	eventsToDispatch, err := cli.fetchAppState(ctx, patch.Type, false, false)
+	if err != nil {
+		return fmt.Errorf("failed to fetch app state after sending update: %w", err)
+	}
+	go func() {
+		for _, evt := range eventsToDispatch {
+			cli.dispatchEvent(evt)
+		}
+	}()
+
+	return nil
+}
+
+func (cli *Client) MarkNotDirty(ctx context.Context, cleanType string, ts time.Time) error {
+	_, err := cli.sendIQ(ctx, infoQuery{
+		Namespace: "urn:xmpp:whatsapp:dirty",
+		Type:      iqSet,
+		To:        types.ServerJID,
+		Content: []waBinary.Node{{
+			Tag: "clean",
+			Attrs: waBinary.Attrs{
+				"type":      cleanType,
+				"timestamp": ts.Unix(),
+			},
+		}},
+	})
+	return err
 }
