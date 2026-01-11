@@ -191,6 +191,38 @@ func parseJID(arg string) (types.JID, bool) {
 	}
 }
 
+// parseJIDWithLID resolves a phone number to its LID for better message delivery
+func parseJIDWithLID(arg string) (types.JID, bool) {
+	// First parse the JID normally
+	jid, ok := parseJID(arg)
+	if !ok {
+		return jid, false
+	}
+
+	// If it's already a LID or group, return as-is
+	if jid.Server == types.HiddenUserServer || jid.Server == types.GroupServer || jid.Server == types.NewsletterServer {
+		return jid, true
+	}
+
+	// Try to resolve LID for regular user JIDs
+	if jid.Server == types.DefaultUserServer {
+		// Look up user info to get LID
+		resp, err := cli.GetUserInfo(context.Background(), []types.JID{jid})
+		if err != nil {
+			log.Warnf("Failed to get user info for %s, using phone number: %v", jid, err)
+			return jid, true
+		}
+
+		if info, exists := resp[jid]; exists && !info.LID.IsEmpty() {
+			log.Infof("Resolved %s to LID %s", jid, info.LID)
+			return info.LID, true
+		}
+	}
+
+	// Fall back to original JID
+	return jid, true
+}
+
 func handleCmd(cmd string, args []string) {
 	switch cmd {
 	case "pair-phone":
@@ -719,7 +751,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: send <jid> <text>")
 			return
 		}
-		recipient, ok := parseJID(args[0])
+		recipient, ok := parseJIDWithLID(args[0])
 		if !ok {
 			return
 		}
@@ -816,7 +848,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: senddoc <jid> <document path> <title>")
 			return
 		}
-		recipient, ok := parseJID(args[0])
+		recipient, ok := parseJIDWithLID(args[0])
 		if !ok {
 			return
 		}
@@ -852,7 +884,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: sendvid <jid> <video path>")
 			return
 		}
-		recipient, ok := parseJID(args[0])
+		recipient, ok := parseJIDWithLID(args[0])
 		if !ok {
 			return
 		}
@@ -925,7 +957,7 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: sendaudio <jid> <audio path>")
 			return
 		}
-		recipient, ok := parseJID(args[0])
+		recipient, ok := parseJIDWithLID(args[0])
 		if !ok {
 			return
 		}
@@ -939,11 +971,25 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Failed to upload file: %v", err)
 			return
 		}
+
+		// Detect MIME type from file extension
+		audioPath := strings.ToLower(args[1])
+		audioMime := "audio/ogg; codecs=opus" // default
+		if strings.HasSuffix(audioPath, ".mp3") {
+			audioMime = "audio/mpeg"
+		} else if strings.HasSuffix(audioPath, ".m4a") {
+			audioMime = "audio/mp4"
+		} else if strings.HasSuffix(audioPath, ".wav") {
+			audioMime = "audio/wav"
+		} else if strings.HasSuffix(audioPath, ".aac") {
+			audioMime = "audio/aac"
+		}
+
 		msg := &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
 			URL:           proto.String(uploaded.URL),
 			DirectPath:    proto.String(uploaded.DirectPath),
 			MediaKey:      uploaded.MediaKey,
-			Mimetype:      proto.String("audio/ogg; codecs=opus"),
+			Mimetype:      proto.String(audioMime),
 			FileEncSHA256: uploaded.FileEncSHA256,
 			FileSHA256:    uploaded.FileSHA256,
 			FileLength:    proto.Uint64(uint64(len(data))),
@@ -954,12 +1000,293 @@ func handleCmd(cmd string, args []string) {
 		} else {
 			log.Infof("Audio message sent (server timestamp: %s)", resp.Timestamp)
 		}
+	case "sendaudioonce":
+		if len(args) < 2 {
+			log.Errorf("Usage: sendaudioonce <jid> <audio path>")
+			return
+		}
+		recipient, ok := parseJIDWithLID(args[0])
+		if !ok {
+			return
+		}
+		data, err := os.ReadFile(args[1])
+		if err != nil {
+			log.Errorf("Failed to read %s: %v", args[1], err)
+			return
+		}
+		uploaded, err := cli.Upload(context.Background(), data, whatsmeow.MediaAudio)
+		if err != nil {
+			log.Errorf("Failed to upload file: %v", err)
+			return
+		}
+		// Detect MIME type
+		audioPath := strings.ToLower(args[1])
+		audioMime := "audio/ogg; codecs=opus"
+		if strings.HasSuffix(audioPath, ".mp3") {
+			audioMime = "audio/mpeg"
+		} else if strings.HasSuffix(audioPath, ".m4a") {
+			audioMime = "audio/mp4"
+		}
+		msg := &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(audioMime),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(data))),
+			ViewOnce:      proto.Bool(true),
+		}}
+		resp, err := cli.SendMessage(context.Background(), recipient, msg)
+		if err != nil {
+			log.Errorf("Error sending view-once audio: %v", err)
+		} else {
+			log.Infof("View-once audio sent (server timestamp: %s)", resp.Timestamp)
+		}
+	case "sendimgonce":
+		if len(args) < 2 {
+			log.Errorf("Usage: sendimgonce <jid> <image path>")
+			return
+		}
+		recipient, ok := parseJIDWithLID(args[0])
+		if !ok {
+			return
+		}
+		data, err := os.ReadFile(args[1])
+		if err != nil {
+			log.Errorf("Failed to read %s: %v", args[1], err)
+			return
+		}
+		uploaded, err := cli.Upload(context.Background(), data, whatsmeow.MediaImage)
+		if err != nil {
+			log.Errorf("Failed to upload file: %v", err)
+			return
+		}
+		msg := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(http.DetectContentType(data)),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(data))),
+			ViewOnce:      proto.Bool(true),
+		}}
+		resp, err := cli.SendMessage(context.Background(), recipient, msg)
+		if err != nil {
+			log.Errorf("Error sending view-once image: %v", err)
+		} else {
+			log.Infof("View-once image sent (server timestamp: %s)", resp.Timestamp)
+		}
+	case "sendaudiobook":
+		if len(args) < 1 {
+			log.Errorf("Usage: sendaudiobook <phone>")
+			log.Errorf("Example: sendaudiobook 18295604002")
+			return
+		}
+
+		recipient, ok := parseJIDWithLID(args[0])
+		if !ok {
+			return
+		}
+
+		// Audio files location
+		audiobookDir := "/home/jcabral/whatsmeow/audio_output"
+
+		// Define chapters in order with emojis
+		type chapter struct {
+			file    string
+			emoji   string
+			number  string
+			title   string
+		}
+		chapters := []chapter{
+			{"Capitulo_00_Prologo", "📖", "Capitulo 00", "Prologo"},
+			{"Capitulo_01", "😴", "Capitulo 01", "El Dominio Dormido"},
+			{"Capitulo_02", "👁️", "Capitulo 02", "El Despertar"},
+			{"Capitulo_03", "🔫", "Capitulo 03", "La Carrera Armamentista"},
+			{"Capitulo_04", "🔄", "Capitulo 04", "La Fusion"},
+			{"Capitulo_05", "🦄", "Capitulo 05", "El Camino al Unicornio"},
+			{"Capitulo_06", "🏚️", "Capitulo 06", "Las Grietas del Imperio"},
+			{"Capitulo_07", "🏗️", "Capitulo 07", "El Arquitecto Solitario"},
+			{"Capitulo_08", "📧", "Capitulo 08", "El Futuro en un Mensaje"},
+			{"Capitulo_09", "⚙️", "Capitulo 09", "La Maquina Que Se Alimenta"},
+			{"Capitulo_10", "🌅", "Capitulo 10", "El Horizonte"},
+		}
+
+		log.Infof("Sending audiobook to %s...", recipient)
+
+		// Send title message
+		titleMsg := &waE2E.Message{Conversation: proto.String("🎧 *LA GUERRA SILENCIOSA* 🎧\n─────────\n_Audio-libro de ficcion especulativa_")}
+		_, err := cli.SendMessage(context.Background(), recipient, titleMsg)
+		if err != nil {
+			log.Errorf("Error sending title: %v", err)
+			return
+		}
+		log.Infof("✓ Title sent")
+		time.Sleep(1 * time.Second)
+
+		// Send each chapter
+		for _, ch := range chapters {
+			// Send chapter text
+			chapterText := fmt.Sprintf("%s *%s*\n─────────\n_%s_", ch.emoji, ch.number, ch.title)
+			textMsg := &waE2E.Message{Conversation: proto.String(chapterText)}
+			_, err := cli.SendMessage(context.Background(), recipient, textMsg)
+			if err != nil {
+				log.Errorf("Error sending chapter text for %s: %v", ch.number, err)
+				continue
+			}
+			log.Infof("✓ Sent: %s", chapterText)
+			time.Sleep(500 * time.Millisecond)
+
+			// Find audio file
+			audioPath := fmt.Sprintf("%s/%s.mp3", audiobookDir, ch.file)
+			if _, err := os.Stat(audioPath); err != nil {
+				log.Warnf("✗ Audio file not found: %s", audioPath)
+				continue
+			}
+
+			// Read and upload audio
+			data, err := os.ReadFile(audioPath)
+			if err != nil {
+				log.Errorf("Failed to read %s: %v", audioPath, err)
+				continue
+			}
+
+			uploaded, err := cli.Upload(context.Background(), data, whatsmeow.MediaAudio)
+			if err != nil {
+				log.Errorf("Failed to upload %s: %v", audioPath, err)
+				continue
+			}
+
+			audioMsg := &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+				URL:           proto.String(uploaded.URL),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				MediaKey:      uploaded.MediaKey,
+				Mimetype:      proto.String("audio/mpeg"),
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(uint64(len(data))),
+				ViewOnce:      proto.Bool(true),
+			}}
+			_, err = cli.SendMessage(context.Background(), recipient, audioMsg)
+			if err != nil {
+				log.Errorf("Error sending audio for %s: %v", ch.number, err)
+			} else {
+				log.Infof("✓ Audio sent: %s", audioPath)
+			}
+			time.Sleep(2 * time.Second)
+		}
+
+		log.Infof("✓ Audiobook sending complete!")
+
+	case "sendaudiobookperm":
+		if len(args) < 1 {
+			log.Errorf("Usage: sendaudiobookperm <phone>")
+			log.Errorf("Example: sendaudiobookperm 18498568737")
+			return
+		}
+
+		recipient, ok := parseJIDWithLID(args[0])
+		if !ok {
+			return
+		}
+
+		// Audio files location
+		audiobookDir := "/home/jcabral/whatsmeow/audio_output"
+
+		// Define chapters in order with emojis
+		type chapter struct {
+			file    string
+			emoji   string
+			number  string
+			title   string
+		}
+		chapters := []chapter{
+			{"Capitulo_00_Prologo", "📖", "Capitulo 00", "Prologo"},
+			{"Capitulo_01", "😴", "Capitulo 01", "El Dominio Dormido"},
+			{"Capitulo_02", "👁️", "Capitulo 02", "El Despertar"},
+			{"Capitulo_03", "🔫", "Capitulo 03", "La Carrera Armamentista"},
+			{"Capitulo_04", "🔄", "Capitulo 04", "La Fusion"},
+			{"Capitulo_05", "🦄", "Capitulo 05", "El Camino al Unicornio"},
+			{"Capitulo_06", "🏚️", "Capitulo 06", "Las Grietas del Imperio"},
+			{"Capitulo_07", "🏗️", "Capitulo 07", "El Arquitecto Solitario"},
+			{"Capitulo_08", "📧", "Capitulo 08", "El Futuro en un Mensaje"},
+			{"Capitulo_09", "⚙️", "Capitulo 09", "La Maquina Que Se Alimenta"},
+			{"Capitulo_10", "🌅", "Capitulo 10", "El Horizonte"},
+		}
+
+		log.Infof("Sending audiobook (permanent) to %s...", recipient)
+
+		// Send title message
+		titleMsg := &waE2E.Message{Conversation: proto.String("🎧 *LA GUERRA SILENCIOSA* 🎧\n─────────\n_Audio-libro de ficcion especulativa_")}
+		_, err := cli.SendMessage(context.Background(), recipient, titleMsg)
+		if err != nil {
+			log.Errorf("Error sending title: %v", err)
+			return
+		}
+		log.Infof("✓ Title sent")
+		time.Sleep(1 * time.Second)
+
+		// Send each chapter
+		for _, ch := range chapters {
+			// Send chapter text
+			chapterText := fmt.Sprintf("%s *%s*\n─────────\n_%s_", ch.emoji, ch.number, ch.title)
+			textMsg := &waE2E.Message{Conversation: proto.String(chapterText)}
+			_, err := cli.SendMessage(context.Background(), recipient, textMsg)
+			if err != nil {
+				log.Errorf("Error sending chapter text for %s: %v", ch.number, err)
+				continue
+			}
+			log.Infof("✓ Sent: %s", ch.number)
+			time.Sleep(500 * time.Millisecond)
+
+			// Find audio file
+			audioPath := fmt.Sprintf("%s/%s.mp3", audiobookDir, ch.file)
+			if _, err := os.Stat(audioPath); err != nil {
+				log.Warnf("✗ Audio file not found: %s", audioPath)
+				continue
+			}
+
+			// Read and upload audio
+			data, err := os.ReadFile(audioPath)
+			if err != nil {
+				log.Errorf("Failed to read %s: %v", audioPath, err)
+				continue
+			}
+
+			uploaded, err := cli.Upload(context.Background(), data, whatsmeow.MediaAudio)
+			if err != nil {
+				log.Errorf("Failed to upload %s: %v", audioPath, err)
+				continue
+			}
+
+			audioMsg := &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+				URL:           proto.String(uploaded.URL),
+				DirectPath:    proto.String(uploaded.DirectPath),
+				MediaKey:      uploaded.MediaKey,
+				Mimetype:      proto.String("audio/mpeg"),
+				FileEncSHA256: uploaded.FileEncSHA256,
+				FileSHA256:    uploaded.FileSHA256,
+				FileLength:    proto.Uint64(uint64(len(data))),
+			}}
+			_, err = cli.SendMessage(context.Background(), recipient, audioMsg)
+			if err != nil {
+				log.Errorf("Error sending audio for %s: %v", ch.number, err)
+			} else {
+				log.Infof("✓ Audio sent: %s", audioPath)
+			}
+			time.Sleep(2 * time.Second)
+		}
+
+		log.Infof("✓ Audiobook (permanent) sending complete!")
+
 	case "sendimg":
 		if len(args) < 2 {
 			log.Errorf("Usage: sendimg <jid> <image path> [caption]")
 			return
 		}
-		recipient, ok := parseJID(args[0])
+		recipient, ok := parseJIDWithLID(args[0])
 		if !ok {
 			return
 		}
