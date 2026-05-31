@@ -137,11 +137,11 @@ func main() {
 			}
 		}
 	}()
-	args := os.Args[1:]
-if len(args) > 0 {
-handleCmd(strings.ToLower(args[0]), args[1:])
-return
-}
+	args := flag.Args()
+	if len(args) > 0 {
+		handleCmd(strings.ToLower(args[0]), args[1:])
+		return
+	}
 	for {
 		select {
 		case <-c:
