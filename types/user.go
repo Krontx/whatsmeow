@@ -9,6 +9,8 @@ package types
 import (
 	"time"
 
+	"go.mau.fi/util/jsontime"
+
 	"go.mau.fi/whatsmeow/proto/waVnameCert"
 )
 
@@ -16,6 +18,12 @@ import (
 type VerifiedName struct {
 	Certificate *waVnameCert.VerifiedNameCertificate
 	Details     *waVnameCert.VerifiedNameCertificate_Details
+
+	VerifiedLevel string
+	Version       int
+	HostStorage   int
+	ActualActors  int
+	PrivacyModeTS time.Time
 }
 
 // UserInfo contains info about a WhatsApp user.
@@ -88,6 +96,8 @@ type IsOnWhatsAppResponse struct {
 	JID   JID    // The canonical user ID
 	IsIn  bool   // Whether the phone is registered or not.
 
+	PhoneNumber JID
+
 	VerifiedName *VerifiedName // If the phone is a business, the verified business details.
 }
 
@@ -118,10 +128,13 @@ const (
 	PrivacySettingUndefined        PrivacySetting = ""
 	PrivacySettingAll              PrivacySetting = "all"
 	PrivacySettingContacts         PrivacySetting = "contacts"
+	PrivacySettingContactAllowlist PrivacySetting = "contact_allowlist"
 	PrivacySettingContactBlacklist PrivacySetting = "contact_blacklist"
 	PrivacySettingMatchLastSeen    PrivacySetting = "match_last_seen"
 	PrivacySettingKnown            PrivacySetting = "known"
 	PrivacySettingNone             PrivacySetting = "none"
+	PrivacySettingOnStandard       PrivacySetting = "on_standard"
+	PrivacySettingOff              PrivacySetting = "off"
 )
 
 // PrivacySettingType is the type of privacy setting.
@@ -135,6 +148,9 @@ const (
 	PrivacySettingTypeReadReceipts PrivacySettingType = "readreceipts" // Valid values: PrivacySettingAll, PrivacySettingNone
 	PrivacySettingTypeOnline       PrivacySettingType = "online"       // Valid values: PrivacySettingAll, PrivacySettingMatchLastSeen
 	PrivacySettingTypeCallAdd      PrivacySettingType = "calladd"      // Valid values: PrivacySettingAll, PrivacySettingKnown
+	PrivacySettingTypeMessages     PrivacySettingType = "messages"     // Valid values: PrivacySettingAll, PrivacySettingContacts
+	PrivacySettingTypeDefense      PrivacySettingType = "defense"      // Valid values: PrivacySettingOnStandard, PrivacySettingOff
+	PrivacySettingTypeStickers     PrivacySettingType = "stickers"     // Valid values: PrivacySettingContacts, PrivacySettingContactAllowlist, PrivacySettingNone
 )
 
 // PrivacySettings contains the user's privacy settings.
@@ -146,6 +162,9 @@ type PrivacySettings struct {
 	ReadReceipts PrivacySetting // Valid values: PrivacySettingAll, PrivacySettingNone
 	CallAdd      PrivacySetting // Valid values: PrivacySettingAll, PrivacySettingKnown
 	Online       PrivacySetting // Valid values: PrivacySettingAll, PrivacySettingMatchLastSeen
+	Messages     PrivacySetting // Valid values: PrivacySettingAll, PrivacySettingContacts
+	Defense      PrivacySetting // Valid values: PrivacySettingOnStandard, PrivacySettingOff
+	Stickers     PrivacySetting // Valid values: PrivacySettingContacts, PrivacySettingContactAllowlist, PrivacySettingNone
 }
 
 // StatusPrivacyType is the type of list in StatusPrivacy.
@@ -166,6 +185,16 @@ type StatusPrivacy struct {
 	List []JID
 
 	IsDefault bool
+}
+
+type SetStatusEmoji struct {
+	Content string `json:"content"`
+}
+
+type SetStatusInput struct {
+	Text     *string          `json:"text"`
+	Emoji    *SetStatusEmoji  `json:"emoji,omitempty"`
+	Duration jsontime.Seconds `json:"ephemeral_duration_sec"`
 }
 
 // Blocklist contains the user's current list of blocked users.

@@ -1339,7 +1339,8 @@ func handleCmd(cmd string, args []string) {
 			log.Errorf("Usage: setstatus <message>")
 			return
 		}
-		err := cli.SetStatusMessage(context.Background(), strings.Join(args, " "))
+		statusText := strings.Join(args, " ")
+		err := cli.SetStatusMessage(context.Background(), types.SetStatusInput{Text: &statusText})
 		if err != nil {
 			log.Errorf("Error setting status message: %v", err)
 		} else {
