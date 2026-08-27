@@ -1,0 +1,25 @@
+# Test media and outputs
+*.jfif
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.mp3
+audio_output/
+
+# Runtime logs
+*.log
+
+# Session storage — NEVER commit (wiping/losing these forces WhatsApp re-pair)
+*.db
+*.db-*
+mdtest.db
+mdtest/whatsmeow.db
+whatsmeow.db
+mdtest/cowisar-coexistence.db
+
+# Old mdtest builds
+mdtest/mdtest.old*
+
+# Local launch/dev artifacts
+.config/
